@@ -4,6 +4,7 @@ namespace Plugin\Yoomoney;
 
 use App\Services\Plugin\AbstractPlugin;
 use App\Contracts\PaymentInterface;
+use App\Models\Order;
 
 class Plugin extends AbstractPlugin implements PaymentInterface
 {
@@ -97,8 +98,7 @@ class Plugin extends AbstractPlugin implements PaymentInterface
             'datetime',
             'sender',
             'codepro',
-            'label',
-            'withdraw_amount'
+            'label'
         ];
 
         foreach ($requiredParams as $param) {
@@ -124,24 +124,39 @@ class Plugin extends AbstractPlugin implements PaymentInterface
 
         // Проверяем совпадение подписи и то, что платеж не защищен кодом протекции
         if (isset($params['sha1_hash']) && $params['sha1_hash'] === $calculatedHash && $params['codepro'] === 'false') {
-            // Сумма, которая была зачислена на счет (за вычетом комиссии)
-            // В ЮMoney `withdraw_amount` - это сумма, которую заплатил пользователь.
-            // `amount` - это сумма, которая пришла на счет.
-            // Xboard ожидает точную сумму или мы можем просто довериться trade_no
-            // Но для безопасности лучше проверить, что сумма достаточна.
-            // Xboard передает заказ в $order при вызове pay(), но в notify() мы получаем только $params.
-            // Возвращаем данные для Xboard, который сам найдет заказ по trade_no и может сверить сумму,
-            // либо мы возвращаем кастомную сумму (в копейках), чтобы ядро Xboard ее проверило.
-            // В Xboard обычно возвращается `custom_result` или просто массив с trade_no.
-            // Для совместимости с Xboard передадим 'custom_amount' или просто вернем массив.
-            // Важно: в новых версиях Xboard может требовать 'amount' или не требовать.
-            // Мы передаем 'callback_no' и 'trade_no'.
+            $tradeNo = $params['label'];
+
+            // Находим заказ в базе данных, чтобы проверить соответствие суммы
+            $order = Order::where('trade_no', $tradeNo)->first();
+            if (!$order) {
+                return false;
+            }
+
+            // В Xboard total_amount хранится в копейках.
+            $orderAmount = $order->total_amount / 100;
+
+            // ЮMoney вычитает комиссию с получателя (0.5% для кошельков, 2% для карт).
+            // 'withdraw_amount' - это полная сумма, которую заплатил отправитель (присутствует не всегда).
+            // 'amount' - это сумма, которая пришла на счет (за вычетом комиссии).
+            $paidAmount = isset($params['withdraw_amount']) ? (float)$params['withdraw_amount'] : (float)$params['amount'];
+
+            // Если withdraw_amount отсутствует, мы вынуждены использовать 'amount'.
+            // В этом случае минимально допустимая сумма = сумма заказа минус 2% максимальной комиссии.
+            $minAcceptableAmount = isset($params['withdraw_amount'])
+                ? ($orderAmount - 0.01)
+                : ($orderAmount * 0.98 - 0.01);
+
+            // Если оплаченная сумма меньше допустимой (защита от изменения суммы в форме)
+            if ($paidAmount < $minAcceptableAmount) {
+                return false;
+            }
 
             return [
-                'trade_no' => $params['label'],       // Xboard's order number
+                'trade_no' => $tradeNo,       // Xboard's order number
                 'callback_no' => $params['operation_id'], // Yoomoney transaction ID
                 'custom_result' => [
-                    'amount' => (int) round($params['withdraw_amount'] * 100)
+                    // Для Xboard возвращаем полную сумму заказа, чтобы он корректно его зачислил
+                    'amount' => (int) round($paidAmount * 100)
                 ]
             ];
         }
