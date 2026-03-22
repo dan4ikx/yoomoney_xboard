@@ -10,6 +10,17 @@ class Plugin extends AbstractPlugin implements PaymentInterface
 {
     public function boot(): void
     {
+        $this->filter('available_payment_methods', function ($methods) {
+            if ($this->getConfig('enabled', true)) {
+                $methods['YooMoney'] = [
+                    'name' => $this->getConfig('display_name', 'ЮMoney'),
+                    'icon' => $this->getConfig('icon', '💵'),
+                    'plugin_code' => $this->getPluginCode(),
+                    'type' => 'plugin'
+                ];
+            }
+            return $methods;
+        });
     }
 
     public function form(): array
