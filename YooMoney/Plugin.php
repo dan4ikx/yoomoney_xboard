@@ -58,10 +58,21 @@ class Plugin extends AbstractPlugin implements PaymentInterface
 
     public function notify($params): array|bool
     {
+        // Extract raw post data if $params is not populated as expected
+        if (empty($params['sha1_hash'])) {
+            $params = request()->post();
+            if (empty($params)) {
+                $params = request()->all();
+            }
+        }
+
         $secret = $this->getConfig('secret');
+
+        Log::info('YooMoney webhook received:', is_array($params) ? $params : []);
 
         // Check required fields from Yoomoney HTTP notification
         if (!isset($params['notification_type'], $params['operation_id'], $params['amount'], $params['currency'], $params['datetime'], $params['sender'], $params['codepro'], $params['label'], $params['sha1_hash'])) {
+            Log::error('YooMoney: Missing required fields in webhook', is_array($params) ? $params : []);
             return false;
         }
 
@@ -104,19 +115,10 @@ class Plugin extends AbstractPlugin implements PaymentInterface
             return false;
         }
 
-        // 'amount' is net amount (after fee), 'withdraw_amount' is gross amount (what user paid).
-        // We use withdraw_amount to match the order total in Xboard so the payment is marked as paid.
-        $amountToCredit = $params['withdraw_amount'] ?? $params['amount'];
-
         // Return verified information
         return [
             'trade_no' => $params['label'],
-            'callback_no' => $params['operation_id'],
-            'custom_result' => [
-                'trade_no' => $params['label'],
-                'callback_no' => $params['operation_id'],
-                'amount' => (int)round($amountToCredit * 100)
-            ]
+            'callback_no' => $params['operation_id']
         ];
     }
 }
