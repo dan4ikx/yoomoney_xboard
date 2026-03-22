@@ -1,0 +1,8 @@
+{
+    "name": "YooMoney",
+    "code": "yoomoney",
+    "type": "payment",
+    "version": "1.0.0",
+    "description": "Оплата банковскими картами и через кошелек ЮMoney для физических лиц",
+    "author": "XBoard Community"
+}
