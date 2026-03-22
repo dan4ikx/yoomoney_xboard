@@ -1,0 +1,8 @@
+{
+    "name": "YooMoney",
+    "code": "yoo_money",
+    "type": "payment",
+    "version": "1.0.0",
+    "description": "YooMoney (ЮMoney) P2P payment plugin",
+    "author": "XBoard Team"
+}
