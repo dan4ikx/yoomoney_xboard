@@ -1,16 +1,19 @@
 <?php
 
-namespace App\Payments;
+namespace Plugin\Yoomoney;
 
-class YooMoney {
-    private $config;
+use App\Services\Plugin\AbstractPlugin;
+use App\Contracts\PaymentInterface;
 
-    public function __construct($config)
+class Plugin extends AbstractPlugin implements PaymentInterface
+{
+    public function boot(): void
     {
-        $this->config = $config;
+        // boot() method is required but usually empty for simple payment methods
+        // Unless we want to hook into something specific. Xboard handles payment methods mostly through the 'PaymentInterface'.
     }
 
-    public function form()
+    public function form(): array
     {
         return [
             'receiver' => [
@@ -26,13 +29,12 @@ class YooMoney {
         ];
     }
 
-    public function pay($order)
+    public function pay($order): array
     {
         $params = [
-            'receiver' => $this->config['receiver'],
+            'receiver' => $this->getConfig('receiver'),
             'quickpay-form' => 'shop',
             'targets' => 'Оплата заказа ' . $order['trade_no'],
-            'paymentType' => 'AC', // AC - Банковская карта, PC - Кошелек ЮMoney
             'sum' => $order['total_amount'] / 100,
             'label' => $order['trade_no'],
             'successURL' => $order['return_url']
@@ -46,9 +48,9 @@ class YooMoney {
         ];
     }
 
-    public function notify($params)
+    public function notify($params): array|bool
     {
-        $secret = $this->config['secret'];
+        $secret = $this->getConfig('secret');
 
         $hashString = implode('&', [
             $params['notification_type'] ?? '',
@@ -82,7 +84,9 @@ class YooMoney {
             return false;
         }
 
-        $paidAmount = (float)$params['amount'];
+        // В ЮMoney $params['withdraw_amount'] - это сумма, списанная с отправителя (до вычета комиссии)
+        // Если параметр не передан (очень старые переводы), используем amount (сумма к зачислению)
+        $paidAmount = isset($params['withdraw_amount']) ? (float)$params['withdraw_amount'] : (float)$params['amount'];
 
         // Сравниваем сумму платежа (до вычета комиссии) с суммой заказа
         if ($paidAmount < ($order->total_amount / 100)) {
