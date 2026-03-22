@@ -43,6 +43,8 @@ class Plugin extends AbstractPlugin implements PaymentInterface
 
     public function pay($order): array
     {
+        Log::info('YooMoney EXACT NOTIFY URL FROM XBOARD:', ['url' => $order['notify_url']]);
+
         // $order['total_amount'] is in cents for Xboard standard, so we divide by 100
         $amount = number_format($order['total_amount'] / 100, 2, '.', '');
 
@@ -81,10 +83,13 @@ class Plugin extends AbstractPlugin implements PaymentInterface
 
         Log::info('YooMoney webhook received:', is_array($params) ? $params : []);
 
-        // Check required fields from Yoomoney HTTP notification
-        if (!isset($params['notification_type'], $params['operation_id'], $params['amount'], $params['currency'], $params['datetime'], $params['sender'], $params['codepro'], $params['label'], $params['sha1_hash'])) {
-            Log::error('YooMoney: Missing required fields in webhook', is_array($params) ? $params : []);
-            return false;
+        // Check required fields from Yoomoney HTTP notification (using array_key_exists since some can be null like 'sender')
+        $requiredFields = ['notification_type', 'operation_id', 'amount', 'currency', 'datetime', 'sender', 'codepro', 'label', 'sha1_hash'];
+        foreach ($requiredFields as $field) {
+            if (!array_key_exists($field, $params)) {
+                Log::error("YooMoney: Missing required field in webhook: {$field}", is_array($params) ? $params : []);
+                return false;
+            }
         }
 
         // Fraud prevention checks:
@@ -96,7 +101,7 @@ class Plugin extends AbstractPlugin implements PaymentInterface
             return false;
         }
 
-        if (isset($params['unaccepted']) && ($params['unaccepted'] === 'true' || $params['unaccepted'] === true)) {
+        if (array_key_exists('unaccepted', $params) && ($params['unaccepted'] === 'true' || $params['unaccepted'] === true)) {
             Log::error('YooMoney: Transfer is unaccepted. Rejected.');
             return false;
         }
@@ -107,16 +112,17 @@ class Plugin extends AbstractPlugin implements PaymentInterface
         }
 
         // SHA-1 verification
+        // YooMoney requires null fields to be represented as empty strings in the hash concatenation
         $hashStr = implode('&', [
-            $params['notification_type'],
-            $params['operation_id'],
-            $params['amount'],
-            $params['currency'],
-            $params['datetime'],
-            $params['sender'],
-            $params['codepro'],
+            $params['notification_type'] ?? '',
+            $params['operation_id'] ?? '',
+            $params['amount'] ?? '',
+            $params['currency'] ?? '',
+            $params['datetime'] ?? '',
+            $params['sender'] ?? '',
+            $params['codepro'] ?? '',
             $secret,
-            $params['label']
+            $params['label'] ?? ''
         ]);
 
         $calculatedHash = sha1($hashStr);
@@ -126,10 +132,32 @@ class Plugin extends AbstractPlugin implements PaymentInterface
             return false;
         }
 
+        // Verify the payment amount against the original order amount
+        // Quickpay redirect links are not signed, so a user could alter the amount parameter in their browser
+        $order = \App\Models\Order::where('trade_no', $params['label'])->first();
+        if (!$order) {
+            Log::error('YooMoney: Order not found', ['label' => $params['label']]);
+            return false;
+        }
+
+        $expectedAmount = $order->total_amount / 100; // Xboard amounts are stored in cents
+        $paidAmount = (float)$params['amount'];
+
+        if ($paidAmount < $expectedAmount) {
+            Log::error('YooMoney: Amount mismatch. Possible fraud.', [
+                'paid' => $paidAmount,
+                'expected' => $expectedAmount
+            ]);
+            return false;
+        }
+
         // Return verified information
+        // In Xboard, returning the 'amount' field ensures the payment gateway service verifies the correct sum
         return [
             'trade_no' => $params['label'],
-            'callback_no' => $params['operation_id']
+            'callback_no' => $params['operation_id'],
+            'amount' => $order->total_amount, // Xboard expects the amount in cents
+            'custom_result' => true
         ];
     }
 }
