@@ -1,0 +1,8 @@
+{
+    "name": "Yoomoney",
+    "code": "yoomoney",
+    "type": "payment",
+    "version": "1.0.0",
+    "description": "Оплата через ЮMoney (кошелек физического лица)",
+    "author": "XBoard"
+}
