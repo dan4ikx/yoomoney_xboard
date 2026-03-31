@@ -43,7 +43,9 @@ class Plugin extends AbstractPlugin implements PaymentInterface
 
     public function pay($order): array
     {
-        Log::info('YooMoney EXACT NOTIFY URL FROM XBOARD:', ['url' => $order['notify_url']]);
+        // Force HTTPS in the logged URL to prevent POST data loss during 301/302 HTTP redirects
+        $notifyUrl = str_replace('http://', 'https://', $order['notify_url']);
+        Log::info('YooMoney EXACT NOTIFY URL FROM XBOARD:', ['url' => $notifyUrl]);
 
         // $order['total_amount'] is in cents for Xboard standard, so we divide by 100
         $amount = number_format($order['total_amount'] / 100, 2, '.', '');
@@ -141,11 +143,14 @@ class Plugin extends AbstractPlugin implements PaymentInterface
         }
 
         $expectedAmount = $order->total_amount / 100; // Xboard amounts are stored in cents
-        $paidAmount = (float)$params['amount'];
+        // Use withdraw_amount (what the user actually paid) if available, otherwise fallback to amount (what the merchant received after fees)
+        $paidAmount = isset($params['withdraw_amount']) ? (float)$params['withdraw_amount'] : (float)$params['amount'];
 
-        if ($paidAmount < $expectedAmount) {
+        // Add a tiny margin of error (e.g. 1-2 kopecks) just in case of float rounding, but generally exact match is expected
+        if (round($paidAmount, 2) < round($expectedAmount, 2)) {
             Log::error('YooMoney: Amount mismatch. Possible fraud.', [
-                'paid' => $paidAmount,
+                'paid_by_user' => $paidAmount,
+                'received_by_merchant' => (float)$params['amount'],
                 'expected' => $expectedAmount
             ]);
             return false;
