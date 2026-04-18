@@ -101,7 +101,7 @@ class Plugin extends AbstractPlugin implements PaymentInterface
         Log::info('YooMoney webhook received:', $params);
 
         // Check required fields from YooMoney HTTP notification (using array_key_exists since some can be null like 'sender')
-        // YooMoney now sends 'sign' (SHA-256) instead of legacy 'sha1_hash' (SHA-1)
+        // YooMoney now sends 'sign' (HMAC-SHA256) instead of legacy 'sha1_hash' (SHA-1)
         $requiredFields = ['notification_type', 'operation_id', 'amount', 'currency', 'datetime', 'sender', 'codepro', 'label'];
         foreach ($requiredFields as $field) {
             if (!array_key_exists($field, $params)) {
@@ -139,7 +139,8 @@ class Plugin extends AbstractPlugin implements PaymentInterface
 
         // Hash verification
         // YooMoney requires null fields to be represented as empty strings in the hash concatenation
-        $hashStr = implode('&', [
+        // Field values used in the hash (same order for all algorithms)
+        $hashFields = [
             $params['notification_type'] ?? '',
             $params['operation_id'] ?? '',
             $params['amount'] ?? '',
@@ -147,21 +148,38 @@ class Plugin extends AbstractPlugin implements PaymentInterface
             $params['datetime'] ?? '',
             $params['sender'] ?? '',
             $params['codepro'] ?? '',
-            $secret,
-            $params['label'] ?? ''
-        ]);
+        ];
 
         if ($useSha256) {
-            // New YooMoney format: 'sign' field with SHA-256
-            $calculatedHash = hash('sha256', $hashStr);
-            if ($calculatedHash !== $params['sign']) {
-                Log::error('YooMoney: SHA-256 sign mismatch', ['calculated' => $calculatedHash, 'received' => $params['sign']]);
-                return false;
+            // New YooMoney format: 'sign' field with HMAC-SHA256
+            // YooMoney's new sign field uses HMAC-SHA256 with the notification secret as the HMAC key,
+            // rather than concatenating the secret into the hash string (as the legacy sha1_hash did).
+            $hmacStr = implode('&', array_merge($hashFields, [$params['label'] ?? '']));
+            $calculatedHash = hash_hmac('sha256', $hmacStr, $secret);
+
+            if (!hash_equals($calculatedHash, $params['sign'])) {
+                // Fallback: try legacy-style plain SHA-256 with secret in the string (same format as sha1_hash
+                // but with SHA-256). This covers the transitional case where YooMoney may use the same string
+                // format as sha1_hash but with SHA-256 algorithm, since official docs are ambiguous on the exact
+                // format for the new sign field.
+                $legacyStr = implode('&', array_merge($hashFields, [$secret, $params['label'] ?? '']));
+                $calculatedHashLegacy = hash('sha256', $legacyStr);
+
+                if (!hash_equals($calculatedHashLegacy, $params['sign'])) {
+                    Log::error('YooMoney: sign verification failed (tried HMAC-SHA256 and plain SHA-256)', [
+                        'hmac_sha256' => $calculatedHash,
+                        'plain_sha256' => $calculatedHashLegacy,
+                        'received' => $params['sign'],
+                        'hash_input_fields' => $hmacStr,
+                    ]);
+                    return false;
+                }
             }
         } else {
-            // Legacy format: 'sha1_hash' field with SHA-1
+            // Legacy format: 'sha1_hash' field with SHA-1 (secret concatenated into the string)
+            $hashStr = implode('&', array_merge($hashFields, [$secret, $params['label'] ?? '']));
             $calculatedHash = sha1($hashStr);
-            if ($calculatedHash !== $params['sha1_hash']) {
+            if (!hash_equals($calculatedHash, $params['sha1_hash'])) {
                 Log::error('YooMoney: SHA-1 hash mismatch', ['calculated' => $calculatedHash, 'received' => $params['sha1_hash']]);
                 return false;
             }
