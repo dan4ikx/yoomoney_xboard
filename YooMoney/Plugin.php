@@ -73,24 +73,39 @@ class Plugin extends AbstractPlugin implements PaymentInterface
 
     public function notify($params): array|bool
     {
-        // Extract raw post data if $params is not populated as expected
-        if (empty($params['sha1_hash']) && empty($params['sign'])) {
+        // Extract raw post data if $params is not populated as expected by xboard
+        if (!is_array($params) || (!isset($params['sha1_hash']) && !isset($params['sign']))) {
             $params = request()->post();
             if (empty($params)) {
                 $params = request()->all();
             }
+            // Last resort: parse raw request body (handles edge cases where Laravel doesn't parse the POST data)
+            if (empty($params)) {
+                $rawInput = file_get_contents('php://input');
+                if (!empty($rawInput)) {
+                    parse_str($rawInput, $params);
+                }
+            }
+        }
+
+        if (!is_array($params) || empty($params)) {
+            Log::error('YooMoney: Webhook received with no data. Ensure YooMoney sends POST to this URL.', [
+                'method' => request()->method(),
+                'content_type' => request()->header('Content-Type'),
+            ]);
+            return false;
         }
 
         $secret = $this->getConfig('secret');
 
-        Log::info('YooMoney webhook received:', is_array($params) ? $params : []);
+        Log::info('YooMoney webhook received:', $params);
 
-        // Check required fields from Yoomoney HTTP notification (using array_key_exists since some can be null like 'sender')
+        // Check required fields from YooMoney HTTP notification (using array_key_exists since some can be null like 'sender')
         // YooMoney now sends 'sign' (SHA-256) instead of legacy 'sha1_hash' (SHA-1)
         $requiredFields = ['notification_type', 'operation_id', 'amount', 'currency', 'datetime', 'sender', 'codepro', 'label'];
         foreach ($requiredFields as $field) {
             if (!array_key_exists($field, $params)) {
-                Log::error("YooMoney: Missing required field in webhook: {$field}", is_array($params) ? $params : []);
+                Log::error("YooMoney: Missing required field in webhook: {$field}", $params);
                 return false;
             }
         }
@@ -99,7 +114,7 @@ class Plugin extends AbstractPlugin implements PaymentInterface
         $useSha256 = array_key_exists('sign', $params);
         $useSha1 = array_key_exists('sha1_hash', $params);
         if (!$useSha256 && !$useSha1) {
-            Log::error('YooMoney: Missing hash field in webhook (neither sign nor sha1_hash found)', is_array($params) ? $params : []);
+            Log::error('YooMoney: Missing hash field in webhook (neither sign nor sha1_hash found)', $params);
             return false;
         }
 
@@ -161,10 +176,12 @@ class Plugin extends AbstractPlugin implements PaymentInterface
         }
 
         $expectedAmount = $order->total_amount / 100; // Xboard amounts are stored in cents
-        // Use withdraw_amount (what the user actually paid) if available, otherwise fallback to amount (what the merchant received after fees)
+        // Use withdraw_amount (gross amount the user actually paid) if available, otherwise fallback to amount
+        // (net amount after YooMoney commission). Using amount would cause false fraud rejections since
+        // YooMoney deducts ~3% commission: e.g. user pays 30.00 RUB but amount=29.10 after fees.
         $paidAmount = isset($params['withdraw_amount']) ? (float)$params['withdraw_amount'] : (float)$params['amount'];
 
-        // Add a tiny margin of error (e.g. 1-2 kopecks) just in case of float rounding, but generally exact match is expected
+        // Use round() to avoid floating-point precision issues in comparison (e.g. 30.00 vs 29.999999...)
         if (round($paidAmount, 2) < round($expectedAmount, 2)) {
             Log::error('YooMoney: Amount mismatch. Possible fraud.', [
                 'paid_by_user' => $paidAmount,
