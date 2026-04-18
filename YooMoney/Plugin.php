@@ -72,7 +72,7 @@ class Plugin extends AbstractPlugin implements PaymentInterface
     public function notify($params): array|bool
     {
         // Extract raw post data if $params is not populated as expected
-        if (empty($params['sha1_hash'])) {
+        if (empty($params['sha1_hash']) && empty($params['sign'])) {
             $params = request()->post();
             if (empty($params)) {
                 $params = request()->all();
@@ -84,12 +84,21 @@ class Plugin extends AbstractPlugin implements PaymentInterface
         Log::info('YooMoney webhook received:', is_array($params) ? $params : []);
 
         // Check required fields from Yoomoney HTTP notification (using array_key_exists since some can be null like 'sender')
-        $requiredFields = ['notification_type', 'operation_id', 'amount', 'currency', 'datetime', 'sender', 'codepro', 'label', 'sha1_hash'];
+        // YooMoney now sends 'sign' (SHA-256) instead of legacy 'sha1_hash' (SHA-1)
+        $requiredFields = ['notification_type', 'operation_id', 'amount', 'currency', 'datetime', 'sender', 'codepro', 'label'];
         foreach ($requiredFields as $field) {
             if (!array_key_exists($field, $params)) {
                 Log::error("YooMoney: Missing required field in webhook: {$field}", is_array($params) ? $params : []);
                 return false;
             }
+        }
+
+        // Determine which hash field is present: new 'sign' (SHA-256) or legacy 'sha1_hash' (SHA-1)
+        $useSha256 = array_key_exists('sign', $params);
+        $useSha1 = array_key_exists('sha1_hash', $params);
+        if (!$useSha256 && !$useSha1) {
+            Log::error('YooMoney: Missing hash field in webhook (neither sign nor sha1_hash found)', is_array($params) ? $params : []);
+            return false;
         }
 
         // Fraud prevention checks:
@@ -111,7 +120,7 @@ class Plugin extends AbstractPlugin implements PaymentInterface
             return false;
         }
 
-        // SHA-1 verification
+        // Hash verification
         // YooMoney requires null fields to be represented as empty strings in the hash concatenation
         $hashStr = implode('&', [
             $params['notification_type'] ?? '',
@@ -125,11 +134,20 @@ class Plugin extends AbstractPlugin implements PaymentInterface
             $params['label'] ?? ''
         ]);
 
-        $calculatedHash = sha1($hashStr);
-
-        if ($calculatedHash !== $params['sha1_hash']) {
-            Log::error('YooMoney: SHA1 hash mismatch', ['calculated' => $calculatedHash, 'received' => $params['sha1_hash']]);
-            return false;
+        if ($useSha256) {
+            // New YooMoney format: 'sign' field with SHA-256
+            $calculatedHash = hash('sha256', $hashStr);
+            if ($calculatedHash !== $params['sign']) {
+                Log::error('YooMoney: SHA-256 sign mismatch', ['calculated' => $calculatedHash, 'received' => $params['sign']]);
+                return false;
+            }
+        } else {
+            // Legacy format: 'sha1_hash' field with SHA-1
+            $calculatedHash = sha1($hashStr);
+            if ($calculatedHash !== $params['sha1_hash']) {
+                Log::error('YooMoney: SHA-1 hash mismatch', ['calculated' => $calculatedHash, 'received' => $params['sha1_hash']]);
+                return false;
+            }
         }
 
         // Verify the payment amount against the original order amount
